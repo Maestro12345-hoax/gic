@@ -18,8 +18,9 @@ CORRECTNESS
     with a sensible fallback (series mean) for flat/intermittent series, then
     aggregated. The original divided a pooled MAE by a single global scale.
   * Honest error metrics. WAPE is the primary KPI for intermittent demand.
-    MAPE is reported only on truly non-zero actual months and clearly labelled
-    (the original silently set zero-actual months to 0% error, deflating it).
+    MAPE follows the team convention: zero-actual months contribute 0% error
+    (this is the standard convention used by the existing ERP reporting and
+    matches the mentor's guidance for cross-comparability).
 
 ACCURACY
   * Rolling-origin backtest (multiple windows) instead of a single 6-month
@@ -360,7 +361,8 @@ def compute_metrics(actual, forecast, naive_scale, cost=None):
     vWAPE     — value-weighted by COST (money at risk).
     MASE      — proper per-series scaling; we report the median (robust).
     Bias%     — sum(f-a)/sum(a); + = over-forecast, - = under (stockout risk).
-    MAPE_nz   — MAPE over non-zero actual months ONLY (clearly scoped).
+    MAPE      — mean absolute % error; per team convention, zero-actual months
+                contribute 0% (matches existing ERP reporting).
     """
     forecast = np.maximum(forecast, 0.0)
     a = actual
@@ -383,8 +385,12 @@ def compute_metrics(actual, forecast, naive_scale, cost=None):
 
     bias = (f - a).sum() / a.sum() * 100 if a.sum() > 0 else np.nan
 
-    nz = a > 0
-    mape_nz = float(np.abs((a[nz] - f[nz]) / a[nz]).mean() * 100) if nz.any() else np.nan
+    # MAPE per team convention: zero-actual months contribute 0% error.
+    # Implemented safely by treating the per-cell error as 0 when actual == 0,
+    # otherwise |actual - forecast| / actual. Mean over ALL cells.
+    safe_actual = np.where(a > 0, a, 1.0)
+    cell_pct = np.where(a > 0, np.abs(a - f) / safe_actual, 0.0)
+    mape = float(cell_pct.mean() * 100)
 
     return {
         "WAPE": round(wape, 3) if wape == wape else np.nan,
@@ -392,7 +398,7 @@ def compute_metrics(actual, forecast, naive_scale, cost=None):
         "MASE_med": round(mase_med, 3),
         "MASE_mean": round(mase_mean, 3),
         "Bias%": round(bias, 3) if bias == bias else np.nan,
-        "MAPE_nz": round(mape_nz, 1) if mape_nz == mape_nz else np.nan,
+        "MAPE": round(mape, 2),
         "MAE": round(float(mae_series.mean()), 4),
         "RMSE": round(float(np.sqrt(((a - f) ** 2).mean())), 4),
     }

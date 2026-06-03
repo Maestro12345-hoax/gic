@@ -21,7 +21,8 @@
 12. [The Cost Framework](#12-the-cost-framework)
 13. [Results Summary](#13-results-summary)
 14. [Likely Judge Questions](#14-likely-judge-questions)
-15. [Glossary of Terms](#15-glossary-of-terms)
+15. [Potential Improvements to the Present Implementation](#15-potential-improvements-to-the-present-implementation)
+16. [Glossary of Terms](#16-glossary-of-terms)
 
 ---
 
@@ -439,12 +440,41 @@ Bias% = sum(forecast - actual) / sum(actual) * 100
 **Why include:** Detects **systematic over- or under-forecasting**. Negative
 bias signals stockout risk; positive bias signals overstock risk.
 
-### MAPE_nz (MAPE on Non-Zero months only)
+### MAPE — Mean Absolute Percentage Error (team convention)
 
-**Why "non-zero only":** Standard MAPE is undefined when actual = 0
-(divide by zero). For intermittent demand where 60-90% of months are
-zero, this is a fatal flaw. We restrict MAPE to months where it is
-**actually defined** and clearly label it.
+```
+For each SKU-month:
+    error% = |actual - forecast| / actual   if actual > 0
+    error% = 0                               if actual == 0
+MAPE = mean(error%) across ALL SKU-months * 100
+```
+
+**The convention we use (per mentor guidance):** when actual demand is
+**zero**, that month contributes **0% error** to the MAPE average (rather
+than being dropped or treated as undefined).
+
+**Why this convention:**
+- Standard MAPE divides by actual, so it is **undefined when actual = 0**.
+  For intermittent demand where 60-90% of months are zero, that breaks MAPE.
+- Treating zero-demand months as 0% error makes MAPE **well-defined for every
+  SKU-month** and keeps it **directly comparable to the existing ERP
+  reporting**, which uses the same convention. Consistency of definition is
+  what lets us compare like-for-like.
+
+**Important caveat to state to judges:** Because this convention counts the
+many zero-demand months as "perfect" (0% error), MAPE is **diluted downward**
+and is **not** a good standalone accuracy measure for intermittent demand.
+That is exactly why **WAPE and MASE are our primary metrics** — they are not
+distorted by the large number of zero months. We report MAPE only for
+**comparability with the ERP's existing dashboards**.
+
+**Honest note on the numbers:** Under this convention the ERP's MAPE
+(~30.7%) is marginally lower than our hybrid's (~32.6%). This is an artifact
+of the convention (the ERP over-forecasts, and on the rare non-zero months
+its larger numbers can look proportionally closer). On every metric that
+properly reflects intermittent-demand accuracy — **WAPE, MASE, MAE, RMSE** —
+our model still wins. Do not let a single diluted metric override the four
+that matter.
 
 ### MAE & RMSE
 
@@ -736,13 +766,148 @@ explainability, and ~50% cost savings — well worth the engineering effort.
 ### Q15: "What's your most important single insight?"
 **A:** The fairest comparison is **what you'd actually order**, not raw
 point forecasts. Once you include service-level safety stock, our hybrid
-model dominates the ERP on **both** accuracy AND cost — a 96.7% vs 77%
-fill rate at 50% lower total cost. That's not a trade-off; that's a
-strict improvement.
+---
+
+## 15. Potential Improvements to the Present Implementation
+
+This section is your "we know the limitations and here's the roadmap" answer.
+Being able to articulate this shows maturity and wins credibility with judges.
+Items are grouped by theme and ordered roughly by impact-to-effort.
+
+### A. Data & Target Improvements
+
+1. **Forecast the raw `UNCAP_UNSCAL_*` demand, not just `CAP_SCAL_*`.**
+   We currently model the capped/scaled series (for a fair comparison vs the
+   ERP). The capping hides true demand spikes. Modelling uncapped demand —
+   and treating the capping as a separate business rule — would recover the
+   real signal and avoid systematically under-sizing buffers for spiky parts.
+
+2. **Use lifecycle columns explicitly** (`NEW_PROD`, `NEW_MODEL`, `PRE_PART`,
+   `SS_PART`, `REPLACEMENT_START_DATE`, `REPLACEBY_START_DATE`).
+   Spare parts are born (new model launch) and die (superseded by a successor
+   part). Right now a brand-new part with 2 months of history is treated like
+   any other. Adding an `is_new`, `months_since_launch`, and `is_superseded`
+   feature — and routing newly-launched parts to an analog/"like-part"
+   forecast — would sharply improve the hardest cases.
+
+3. **Incorporate external drivers.** Vehicle parc data (how many vehicles of
+   each model are on the road and their age), warranty/recall campaigns,
+   service-interval schedules, and even macro signals. A brake-pad's demand
+   is downstream of the number of in-warranty vehicles — that is a powerful,
+   currently-unused predictor.
+
+4. **Data-quality hardening.** The raw file had a duplicate `M31` and a
+   missing `M32` in the uncapped block. A validation step (assert 37 clean
+   monthly columns, no duplicate periods, non-negative demand, consistent
+   report date) should run before modelling and fail loudly.
+
+### B. Modelling Improvements
+
+5. **Hyperparameter tuning per demand pattern.** We use one sensible LightGBM
+   config for all SKUs. Tuning (via Optuna / grid search) **separately for
+   each pattern** — and tuning the Croston/SBA/TSB/SES smoothing constants
+   (currently fixed at α=0.15 / 0.20) per SKU or per pattern — would squeeze
+   out more accuracy.
+
+6. **Cross-learning ML / global models with SKU embeddings.** Instead of
+   hand-crafted static encodings, learn an embedding per SKU (or per
+   part-family) so the model shares strength across similar parts. This is
+   how the M5 competition winners handled tens of thousands of series.
+
+7. **Richer ensembling.** We use a simple SBA+LightGBM average. Better options:
+   - **Stacking**: train a meta-model that learns the optimal weights per SKU
+     given its features (a model that predicts which model to trust).
+   - **Weighted blends** tuned on the validation window rather than a fixed 50/50.
+
+8. **Modern intermittent-demand methods.** Add **ADIDA / IMAPA** (temporal
+   aggregation — aggregate to quarters, forecast, disaggregate; reduces zero
+   noise) and **Willemain's bootstrap** (resamples historical demand to build
+   a full lead-time demand distribution — excellent for safety stock).
+
+9. **Dedicated new-product / cold-start handling.** "Like-for-like" forecasting
+   that borrows the demand curve of a similar mature part for SKUs with little
+   history, then blends toward the SKU's own data as it accumulates.
+
+### C. Forecasting-Process Improvements
+
+10. **Multi-window rolling-origin backtest.** We currently evaluate one
+    6-month window (Nov-25 → Apr-26). Averaging metrics over **several** rolling
+    origins (e.g. test on each of the last 12 month-ends) gives a far more
+    robust, less luck-dependent estimate of accuracy and prevents over-tuning
+    to one window.
+
+11. **Multi-horizon evaluation.** We backtest one-month-ahead. Replenishment
+    decisions depend on the full lead time, so we should also measure
+    2- and 3-month-ahead accuracy explicitly and report degradation by horizon.
+
+12. **Direct multi-step instead of recursive.** The forward forecast feeds its
+    own predictions back as inputs (recursive), which compounds error. Training
+    a separate model per horizon (direct strategy) usually wins at h=2,3.
+
+13. **Hierarchical reconciliation.** Forecast at SKU level AND at
+    category/brand/warehouse level, then reconcile (MinT) so the SKU forecasts
+    sum to a coherent, less-noisy total. Improves both levels.
+
+### D. Inventory & Cost Improvements (highest business value)
+
+14. **Per-SKU lead times.** Safety stock currently assumes a global 2-month
+    lead time. Real lead times vary enormously by supplier; using the actual
+    per-SKU lead time (and its variability) is the single biggest lever on
+    safety-stock accuracy. `SS = z * sqrt(LT * σ_d² + d² * σ_LT²)` properly
+    accounts for lead-time variability too.
+
+15. **Empirical / distribution-based safety stock instead of the normal
+    approximation.** The `z * σ * √LT` formula assumes demand is normal — it
+    is not (it's intermittent and skewed). Sizing safety stock directly from
+    the **P-quantile of simulated lead-time demand** (bootstrap or quantile
+    forecast) is more accurate for these distributions.
+
+16. **Joint cost optimization (the "right" objective).** Rather than forecast
+    accuracy then safety stock, optimize the **total expected cost** (holding +
+    stockout + ordering) directly per SKU, choosing the order-up-to level that
+    minimizes expected cost. This aligns the model with the real business goal.
+
+17. **Calibrate the cost assumptions with finance.** Replace the assumed 25%
+    holding rate and 1.5–10x stockout multipliers with the **actual** numbers
+    from JLR finance and per-part criticality, so the savings figure is exact
+    rather than a defensible estimate.
+
+18. **EOQ and order-batching integration.** Combine the reorder point with
+    Economic Order Quantity (`EOQ_QTY` is in the data) and supplier MOQ /
+    pack-size constraints to produce a directly actionable order plan.
+
+### E. Engineering / Productionization
+
+19. **Automated monthly retraining + drift monitoring.** Schedule
+    `run_pipeline(cfg)` monthly as data arrives; track WAPE/Bias over time and
+    alert when accuracy drifts so models are retrained or investigated.
+
+20. **Backtest-driven model registry.** Persist each month's chosen routing and
+    metrics; only promote a new model to production if it beats the incumbent on
+    the rolling backtest (champion/challenger).
+
+21. **Prediction intervals everywhere + dashboards.** Surface P50/P90 bands and
+    safety-stock recommendations in an interactive dashboard for planners, with
+    the ability to override known events (recalls, promotions).
+
+22. **Unit & integration tests in CI.** We have a leakage test and a
+    vectorised-vs-reference equivalence check; expand these into a CI suite
+    (schema checks, metric regression tests) so changes can't silently break
+    the pipeline.
+
+23. **Scale-out for many warehouses.** The pipeline is location-agnostic;
+    wrap it to run per-location in parallel (e.g. across all IN0x sites) and
+    aggregate results centrally.
+
+### How to present this section
+If a judge asks "what would you do with more time?", pick the **three highest-
+impact items**: (1) per-SKU lead times + distribution-based safety stock,
+(2) lifecycle/new-product handling, and (3) multi-window rolling backtest.
+These directly address the biggest real-world gaps without overclaiming.
 
 ---
 
-## 15. Glossary of Terms
+## 16. Glossary of Terms
 
 | Term | Definition |
 |---|---|
@@ -759,7 +924,7 @@ strict improvement.
 | **CV** | Coefficient of Variation — σ/μ |
 | **WAPE** | Weighted Absolute Percentage Error |
 | **MASE** | Mean Absolute Scaled Error |
-| **MAPE** | Mean Absolute Percentage Error |
+| **MAPE** | Mean Absolute % Error (our convention: zero-actual months = 0% error) |
 | **Bias** | Average signed error (over/under direction) |
 | **Tweedie** | Compound Poisson-Gamma probability distribution |
 | **Quantile regression** | Predicting a specific percentile of the distribution |
