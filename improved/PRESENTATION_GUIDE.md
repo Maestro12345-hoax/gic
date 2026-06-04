@@ -186,9 +186,39 @@ The classification:
 - Lumpy: 5,978 (74%)
 - Erratic: 1,061 (13%)
 - Smooth: 780 (10%)
-- Intermittent: 245 (3%)
+- Dead/No-Demand: 245 (3%)
 
 This is **typical for automotive aftermarket** — long-tail, highly intermittent.
+
+### Important nuance: the "Dead/No-Demand" category (and why "Intermittent" is empty)
+
+When we first ran the raw Syntetos-Boylan formula, 245 SKUs were labelled
+**"Intermittent"** — but on inspection **all 245 had zero demand across the
+entire 37-month history**. They are not intermittent; they are **dead /
+obsolete** parts. They land in the SB "Intermittent" quadrant only as a
+**formula artifact**:
+- An all-zero series has fewer than 2 demand events, so ADI defaults to the
+  series length (37) → counts as "rare" (high ADI)
+- An all-zero series has mean = 0, so CV is defined as 0 → counts as
+  "consistent" (low CV²)
+- High ADI + low CV² = "Intermittent"
+
+We therefore add an explicit rule: **any SKU with zero demand in all 37 months
+is labelled `Dead/No-Demand`**, not Intermittent. The correct forecast for
+these is simply **zero** (and our zero-gate already produces that).
+
+**Why there is then no "Intermittent" row at all:** every *active* SKU (≥1 sale)
+turns out to have variable order sizes (CV² ≥ 0.49), so genuinely
+sparse-but-active parts fall into **Lumpy** rather than Intermittent. In this
+dataset the Intermittent quadrant only ever held the dead parts. This is a
+real, defensible property of the data — worth stating proactively.
+
+**Why it was missing from the per-pattern table earlier:** WAPE =
+Σ|actual−forecast| / Σ(actual). For a group with zero total demand the
+denominator is 0 → WAPE is undefined (NaN), and pandas `pivot_table` silently
+drops an all-NaN row. We fixed the reporting to (a) print a **coverage table**
+listing every category with its SKU count and test-window demand, and (b) keep
+the row visible (`dropna=False`) so nothing is hidden.
 
 ---
 
@@ -491,16 +521,20 @@ optimal methods (proven theoretically and shown in our heatmap).
 
 **Routing logic:**
 ```python
-for each demand pattern in [Smooth, Erratic, Intermittent, Lumpy]:
+for each demand pattern in [Smooth, Erratic, Lumpy]:
     pick the model with lowest WAPE on that pattern
     assign all SKUs of that pattern to that model
+# Dead/No-Demand parts are routed to a constant zero forecast
 ```
 
 **Our learned routing on real data:**
 - Smooth → **SES** (simple, accurate for clean demand)
 - Erratic → **XGBoost** (ML handles variance with rich features)
-- Intermittent → **SBA** (classical specialist)
 - Lumpy → **LightGBM** (ML's flexibility wins on the hardest pattern)
+- Dead/No-Demand → **zero forecast** (correct by construction for dead parts)
+
+(There is no Intermittent route — see Section 5: that quadrant held only
+dead parts in this dataset, now labelled Dead/No-Demand.)
 
 **Robust fallback:** If WAPE is undefined for a pattern (zero total demand
 in test window), we fall back to MASE, then to a theory-aligned default
@@ -766,6 +800,24 @@ explainability, and ~50% cost savings — well worth the engineering effort.
 ### Q15: "What's your most important single insight?"
 **A:** The fairest comparison is **what you'd actually order**, not raw
 point forecasts. Once you include service-level safety stock, our hybrid
+model dominates the ERP on **both** accuracy AND cost — a 96.7% vs 77%
+fill rate at ~50% lower total cost. That's not a trade-off; that's a
+strict improvement.
+
+### Q16: "Why is there no 'Intermittent' category in your per-pattern results?"
+**A:** Great catch — two things stacked. First, when we ran the raw
+Syntetos-Boylan formula, the 245 SKUs it labelled "Intermittent" turned out
+to have **zero demand across all 37 months** — they're dead/obsolete parts,
+not truly intermittent. The formula mislabels all-zero series as Intermittent
+(no demand events → ADI defaults high; zero variance → CV² low). We relabel
+these explicitly as **Dead/No-Demand**, whose correct forecast is simply zero.
+Second, those dead parts have zero total demand, so WAPE (Σ|err|/Σactual) is
+undefined and the table row was being silently dropped. We fixed reporting to
+show a coverage table for **every** category. Interestingly, **no active SKU
+falls in the Intermittent quadrant** here — active sparse parts have variable
+order sizes (CV² ≥ 0.49) so they land in Lumpy. That's a genuine, defensible
+property of this dataset.
+
 ---
 
 ## 15. Potential Improvements to the Present Implementation

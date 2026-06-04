@@ -176,9 +176,17 @@ def classify_demand(demand):
         np.where(cv2 >= 0.49, "Lumpy", "Intermittent"),
         np.where(cv2 >= 0.49, "Erratic", "Smooth"),
     )
+    # A series with zero demand across the whole window is not "intermittent" -
+    # it is dead/obsolete. The raw SB formula mislabels all-zero series as
+    # "Intermittent" (ADI defaults to the series length -> rare; CV2 = 0 ->
+    # consistent). Label them explicitly so they do not pollute that bucket.
+    nonzero_counts = (demand > 0).sum(axis=1)
+    demand_type = np.where(nonzero_counts == 0, "Dead/No-Demand", demand_type)
+
     return pd.DataFrame({
         "zero_rate": zero_rate, "mean_demand": mean_dem,
-        "cv": cv, "adi": adi, "demand_type": demand_type,
+        "cv": cv, "adi": adi, "nonzero_months": nonzero_counts,
+        "demand_type": demand_type,
     })
 
 
@@ -661,6 +669,15 @@ def run_pipeline(cfg: Config | None = None, verbose: bool = True):
     for patt in sorted(meta["demand_type"].unique()):
         mask = (meta["demand_type"] == patt).values
         if mask.sum() == 0:
+            continue
+        # Dead/No-Demand parts: the correct forecast is simply zero. Route them
+        # to SBA (which predicts ~0 for an all-zero history) and skip selection.
+        if patt == "Dead/No-Demand":
+            for name, p in preds.items():
+                mm = compute_metrics(actual[mask], p[mask], naive_scale[mask], cost[mask])
+                mm["demand_type"], mm["model"], mm["n_sku"] = patt, name, int(mask.sum())
+                patt_rows.append(mm)
+            routing[patt] = "SBA"
             continue
         # Rank by WAPE when it is defined (some patterns can have zero total
         # actual demand in the test window -> WAPE undefined); fall back to the
