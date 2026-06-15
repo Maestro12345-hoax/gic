@@ -1,0 +1,87 @@
+// JLR Spare-Parts Demand Forecasting — Algorithm Flowchart
+// Render:  dot -Tpng -Gdpi=300 algorithm_flowchart.dot -o algorithm_flowchart.png
+//          dot -Tsvg algorithm_flowchart.dot -o algorithm_flowchart.svg
+digraph forecasting {
+    rankdir=LR;
+    bgcolor="white";
+    splines=ortho;
+    nodesep=0.45;
+    ranksep=0.55;
+    fontname="Helvetica";
+    labelloc="t";
+    fontsize=26;
+    label=<<B>JLR Spare-Parts Demand Forecasting &mdash; Algorithm Pipeline</B><BR/><FONT POINT-SIZE="14">8,064 SKUs &bull; 37 months (May-2023 &rarr; May-2026) &bull; Location IN00</FONT>>;
+
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=14,
+          margin="0.18,0.12", penwidth=1.6, color="#34495e"];
+    edge [fontname="Helvetica", fontsize=11, color="#2c3e50", penwidth=1.4, arrowsize=0.9];
+
+    // ---------- 1. DATA ----------
+    data [label=<<B>1. LOAD DATA</B><BR/><FONT POINT-SIZE="11">IN00 Excel &bull; 8,064 SKUs &times; 37 months<BR/>Demand (CAP_SCAL) + ERP forecast (FCST_H)<BR/>Metadata: class, COST, TSL</FONT>>,
+           fillcolor="#d6eaf8"];
+
+    // ---------- 2. CLASSIFY ----------
+    classify [label=<<B>2. CLASSIFY DEMAND PATTERN</B><BR/><FONT POINT-SIZE="11">Syntetos&ndash;Boylan: ADI &amp; CV&sup2;</FONT>>,
+              fillcolor="#d1f2eb"];
+    smooth       [label=<<B>Smooth</B><BR/><FONT POINT-SIZE="10">780</FONT>>, fillcolor="#abebc6"];
+    erratic      [label=<<B>Erratic</B><BR/><FONT POINT-SIZE="10">1,061</FONT>>, fillcolor="#f9e79f"];
+    lumpy        [label=<<B>Lumpy</B><BR/><FONT POINT-SIZE="10">5,978</FONT>>, fillcolor="#f5b7b1"];
+    dead         [label=<<B>Dead / No-Demand</B><BR/><FONT POINT-SIZE="10">245 (forecast = 0)</FONT>>, fillcolor="#d5d8dc"];
+
+    // ---------- 3. FEATURES ----------
+    feats [label=<<B>3. FEATURE ENGINEERING</B><BR/><FONT POINT-SIZE="11">23 point-in-time features (NO leakage):<BR/>lags, rolling mean/std, trend, ADI,<BR/>months-since-sale, seasonality, class, log-cost</FONT>>,
+           fillcolor="#fdebd0"];
+
+    // ---------- 4. MODELS ----------
+    subgraph cluster_models {
+        label=<<B>4. TRAIN MODELS</B>>;
+        labeljust="l"; fontsize=15; style="rounded,dashed"; color="#7f8c8d";
+        stat [label=<<B>Statistical</B><BR/><FONT POINT-SIZE="10">SES &bull; Croston &bull; SBA &bull; TSB<BR/>(vectorised, intermittent-demand)</FONT>>, fillcolor="#e8daef"];
+        ml   [label=<<B>Machine Learning</B><BR/><FONT POINT-SIZE="10">LightGBM &bull; XGBoost &bull; RF<BR/>Tweedie loss + Ensemble</FONT>>, fillcolor="#d4e6f1"];
+        gate [label=<<B>Zero-Demand Gate</B><BR/><FONT POINT-SIZE="10">classifier snaps near-zero &rarr; 0</FONT>>, fillcolor="#fad7a0"];
+        quant[label=<<B>Quantile Heads</B><BR/><FONT POINT-SIZE="10">P50 / P90 for uncertainty</FONT>>, fillcolor="#a9cce3"];
+    }
+
+    // ---------- 5. BACKTEST ----------
+    backtest [label=<<B>5. BACKTEST &amp; EVALUATE</B><BR/><FONT POINT-SIZE="11">Train &le; Oct-25 &bull; Test Nov-25 &rarr; Apr-26<BR/>Metrics: WAPE, vWAPE, MASE, Bias, MAPE</FONT>>,
+              fillcolor="#d1f2eb"];
+
+    // ---------- 6. HYBRID ----------
+    hybrid [label=<<B>6. HYBRID ROUTING</B><BR/><FONT POINT-SIZE="11">Best model per pattern:<BR/>Smooth&rarr;SES &bull; Erratic&rarr;XGB &bull; Lumpy&rarr;LGBM<BR/>Dead&rarr;0</FONT>>,
+            fillcolor="#aed6f1"];
+
+    // ---------- 7. FORWARD ----------
+    forward [label=<<B>7. FORWARD FORECAST</B><BR/><FONT POINT-SIZE="11">Refit on full history<BR/>Predict Jun&ndash;Aug 2026 + P50/P90 bands</FONT>>,
+             fillcolor="#fdebd0"];
+
+    // ---------- 8. INVENTORY ----------
+    inv [label=<<B>8. INVENTORY LAYER</B><BR/><FONT POINT-SIZE="11">Safety stock = z(TSL) &middot; &sigma; &middot; &radic;LT<BR/>Reorder point = lead-time demand + SS</FONT>>,
+         fillcolor="#d2b4de"];
+
+    // ---------- 9. COMPARE ----------
+    compare [label=<<B>9. COMPARE vs ERP (FCST_H)</B><BR/><FONT POINT-SIZE="11">WAPE 38.2% vs 41.0% &bull; MASE 0.82 vs 0.98<BR/>Fill rate 96.7% vs 77% &bull; ~50% lower cost</FONT>>,
+             fillcolor="#a3e4d7"];
+
+    // ---------- 10. OUTPUT ----------
+    output [label=<<B>10. OUTPUT</B><BR/><FONT POINT-SIZE="11">Excel (5 sheets): forecasts, leaderboard,<BR/>by-pattern, hybrid-vs-system, inventory-vs-ERP</FONT>>,
+            shape=box, style="rounded,filled", fillcolor="#2ecc71", fontcolor="white"];
+
+    // ---------- EDGES ----------
+    data -> classify;
+    classify -> smooth; classify -> erratic; classify -> lumpy; classify -> dead;
+    smooth -> feats; erratic -> feats; lumpy -> feats;
+    dead -> hybrid [style=dashed, label="zero", constraint=false];
+
+    feats -> stat; feats -> ml;
+    ml -> gate; ml -> quant;
+    stat -> backtest; gate -> backtest;
+    backtest -> hybrid;
+    hybrid -> forward;
+    quant -> forward [style=dashed];
+    forward -> inv;
+    inv -> compare;
+    compare -> output;
+
+    // keep statistical/ml/gate/quant on tidy ranks
+    {rank=same; smooth; erratic; lumpy; dead;}
+}
