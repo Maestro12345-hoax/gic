@@ -616,13 +616,19 @@ isn't that bad?").
 
 ### The honest framework: order = forecast + safety stock
 
-**Don't compare raw point forecasts** to the ERP — that's apples to oranges
-because the ERP's forecast implicitly carries its own buffer.
+**Don't compare raw point forecasts** to the ERP -- that's apples to oranges
+because neither represents what you'd actually order.
 
-**The right comparison:** What you'd actually order under each system.
+**The right comparison:** Apply the same safety-stock formula to BOTH forecasts
+so that any performance difference comes purely from forecast accuracy, not from
+one side having a buffer the other lacks.
 
 **For our model:** point forecast + service-level safety stock = realistic order
-**For the ERP:** their FCST_H (which is already inflated to act as a buffer)
+**For the ERP:** FCST_H + same service-level safety stock = realistic order
+
+Both sides receive: `SS = z_score * sigma_LT / sqrt(LT)` with the same z-score
+and the same per-SKU volatility estimate. This symmetric methodology ensures
+the cost difference reflects only forecasting quality.
 
 ### Cost components
 
@@ -641,8 +647,12 @@ because the ERP's forecast implicitly carries its own buffer.
 
 Because the "true" stockout cost is unknown and varies by part, we show
 the cost story across the full range. **The result holds at every level**:
-Hybrid+SS beats ERP by ~50% across all penalty assumptions, which makes the
-conclusion **robust to assumptions**.
+Hybrid+SS saves ~1% vs ERP+SS across all penalty assumptions, which makes the
+conclusion **robust to assumptions**. The savings are modest in percentage
+terms because both forecasts, when given the same buffer, achieve similar
+service levels. The real value is that the Hybrid model's superior accuracy
+means less safety stock is NEEDED for the same service level -- reducing
+holding costs over time.
 
 ### Annualization
 
@@ -666,23 +676,40 @@ because:
 | MAE | 3.01 | 3.23 | **6.8% lower** |
 | RMSE | 36.5 | 40.3 | **9.4% lower** |
 
-### Inventory cost (with safety stock)
+### Inventory cost (symmetric comparison: both forecasts + same safety stock)
 
-| Stockout Penalty | Hybrid+SS | ERP | Savings | % |
+| Stockout Penalty | Hybrid+SS | ERP+SS | Savings | % |
 |---|---|---|---|---|
-| 1.0x | $3.1M | $6.3M | **$3.2M** | 50% |
-| 1.5x | $4.5M | $9.4M | **$4.8M** | 52% |
-| 3.0x | $8.8M | $18.6M | **$9.8M** | 53% |
-| 5.0x | $14.5M | $31.0M | **$16.5M** | 53% |
+| 1.0x | $3,119,570 | $3,158,992 | **$39,421** | 1.2% |
+| 1.5x | $4,541,525 | $4,594,818 | **$53,293** | 1.2% |
+| 2.0x | $5,963,479 | $6,030,645 | **$67,166** | 1.1% |
+| 3.0x | $8,807,388 | $8,902,298 | **$94,910** | 1.1% |
+| 5.0x | $14,495,205 | $14,645,604 | **$150,399** | 1.0% |
+| 10.0x | $28,714,749 | $29,003,870 | **$289,121** | 1.0% |
 
-### Service level (fill rate)
+### Service level (fill rate -- symmetric, both have safety stock)
 
-- Hybrid + Safety Stock: **96.7%** average fill rate
-- ERP System: **77%** average fill rate
-- **Improvement: ~20 percentage points better customer service**
+- Hybrid + Safety Stock: **96.6%** average fill rate
+- ERP + Safety Stock: **97.0%** average fill rate
+- Gap: -0.4 percentage points (ERP+SS slightly higher because ERP already
+  over-forecasts, so adding the same SS makes it even more conservative)
+- **Hybrid+SS achieves near-identical service with less excess inventory**
+
+### Over/under prediction (with safety stock applied)
+
+- Hybrid+SS: 90.6% over-predicted, 6.2% under-predicted
+- ERP+SS: 95.8% over-predicted, 2.2% under-predicted
+- The ERP over-stocks far more SKUs -- that extra conservatism is wasteful
 
 ### Annualized estimate
-**$9.7M – $19.7M / year** depending on stockout penalty assumption.
+**$107K - $190K / year** depending on stockout penalty assumption
+(conservative at 1.5x: $106,587/year; realistic at 3.0x: $189,820/year).
+
+**Key insight:** The modest cost savings reflect that the main advantage is
+forecast accuracy (WAPE 38.2% vs 41.0%), which enables using LESS safety stock
+for the same service level. In a production deployment where SS is calibrated
+per-SKU based on forecast error, the Hybrid model would need smaller buffers --
+compounding the savings.
 
 ---
 
@@ -716,10 +743,22 @@ that matches spare-parts demand structure.
 
 ### Q4: "Your model under-predicts more SKUs than the ERP. Isn't that bad?"
 **A:** That's why we don't use the raw point forecast for ordering. The
-right thing to order is **point forecast + safety stock**. With service-
-level-sized safety stock, we hit 96.7% fill rate vs the ERP's 77%, AND
-save ~50% of cost. The ERP's apparent "buffer" from over-forecasting is
-crude and wasteful — it over-stocks expensive parts unnecessarily.
+right thing to order is **point forecast + safety stock**. We apply the same
+safety-stock formula to both forecasts for a fair comparison. With that
+symmetric buffer, Hybrid+SS hits 96.6% fill rate (comparable to ERP+SS at
+97.0%) while costing ~1% less. The ERP over-forecasts more heavily, which
+with the same SS added leads to excessive over-stocking -- 95.8% of SKUs
+are over-predicted vs 90.6% for the Hybrid. That extra conservatism is
+wasteful inventory carrying cost.
+
+### Q4b: "Doesn't the ERP already include its own safety stock?"
+**A:** Yes -- the ERP system has its own SAFTY and REORDER_POINT columns in
+the data. That is precisely why we apply the same buffer formula to both
+sides for a fair comparison. If we only added safety stock to our forecast
+and compared against the ERP's raw FCST_H (without its buffer), we would
+overstate savings. The symmetric methodology ensures the remaining cost
+difference comes purely from lower forecast error, not from one side having
+a buffer the other lacks.
 
 ### Q5: "Why is your hybrid biased downward (negative Bias%)?"
 **A:** Tweedie regression and intermittent-demand methods are well-known
@@ -795,14 +834,16 @@ choice rather than pooling.
 handle intermittent demand well, don't expose the safety-stock layer
 we need, and don't allow the per-pattern routing strategy that's the
 key to our accuracy gains. A custom pipeline gives us full control,
-explainability, and ~50% cost savings — well worth the engineering effort.
+explainability, and measurable cost savings -- well worth the engineering effort.
 
 ### Q15: "What's your most important single insight?"
 **A:** The fairest comparison is **what you'd actually order**, not raw
-point forecasts. Once you include service-level safety stock, our hybrid
-model dominates the ERP on **both** accuracy AND cost — a 96.7% vs 77%
-fill rate at ~50% lower total cost. That's not a trade-off; that's a
-strict improvement.
+point forecasts. Once you apply the same safety-stock formula to both
+forecasts, the Hybrid model achieves comparable fill rates (96.6% vs 97.0%)
+at ~1% lower cost. The real story is accuracy: WAPE 38.2% vs 41.0% means
+you need less safety stock for the same service level. In production, that
+translates to leaner buffers and compounding savings over time -- without
+sacrificing availability.
 
 ### Q16: "Why is there no 'Intermittent' category in your per-pattern results?"
 **A:** Great catch — two things stacked. First, when we ran the raw
@@ -1007,8 +1048,8 @@ These directly address the biggest real-world gaps without overclaiming.
    asks "why Tweedie?", you can explain in one sentence ("zero-inflated
    non-negative data") OR five (full distribution explanation).
 
-5. **Know your numbers cold**: WAPE 38.2%, fill rate 96.7%, 50% cost
-   savings, 8,064 SKUs, 37 months. These come up over and over.
+5. **Know your numbers cold**: WAPE 38.2%, fill rate 96.6%, ~1% cost
+   savings (accuracy-driven), 8,064 SKUs, 37 months. These come up over and over.
 
 6. **Have a "future work" answer ready**: shows you understand limitations
    without weakening confidence.
